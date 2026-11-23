@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( EUID == 0 )); then
+  if [[ -n "${BATCAL_BAT_DIR:-}" && "${BATCAL_BAT_DIR}" =~ ^/sys/class/power_supply/BAT[0-9]+$ ]]; then
+    BAT_DIR="${BATCAL_BAT_DIR}"
+  else
+    BAT_DIR="/sys/class/power_supply/BAT0"
+  fi
+else
+  BAT_DIR="${BATCAL_BAT_DIR:-/sys/class/power_supply/BAT0}"
+fi
+
+UPOWER_DROPIN="/etc/UPower/UPower.conf.d/99-batcal.conf"
+
+# Script-global state so EXIT/INT/TERM/HUP trap can always access them after run_session returns
+CLEANED_UP=0
+ORIG_START=0
+ORIG_STOP=100
+UPOWER_MODIFIED=0
+
+valid_percent() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#$1 >= 0 && 10#$1 <= 100 ))
+}
+
+write_behaviour() {
+  local mode="${1:-}"
+  case "$mode" in
+    auto|inhibit-charge|force-discharge) ;;
+    *) echo "ERR invalid behaviour: $mode"; return 1 ;;
+  esac
+  if [[ ! -w "$BAT_DIR/charge_behaviour" ]]; then
+    echo "ERR charge_behaviour not writable"
+    return 1
+  fi
+  if ! printf '%s\n' "$mode" > "$BAT_DIR/charge_behaviour" 2>/dev/null; then
+    echo "ERR write failed: charge_behaviour"
+    return 1
+  fi
+  echo "OK"
+}
+
+write_thresholds() {
+  local raw_start="${1:-}" raw_stop="${2:-}"
+  if ! valid_percent "$raw_start" || ! valid_percent "$raw_stop"; then
+    echo "ERR invalid thresholds: $raw_start $raw_stop"
+    return 1
+  fi
+  local start=$((10#$raw_start))
+  local stop=$((10#$raw_stop))
+  if (( start >= stop )); then
+    echo "ERR invalid thresholds: $start >= $stop"
+    return 1
+  fi
+
+  local start_f="$BAT_DIR/charge_control_start_threshold"
+  local stop_f="$BAT_DIR/charge_control_end_threshold"
+  if [[ ! -w "$start_f" || ! -w "$stop_f" ]]; then
+    echo "ERR threshold sysfs not writable"
+    return 1
+  fi
+
+  local cur_stop_raw="100"
+  [[ -r "$stop_f" ]] && cur_stop_raw=$(cat "$stop_f" 2>/dev/null || echo "100")
+  local cur_stop=100
+  valid_percent "$cur_stop_raw" && cur_stop=$((10#$cur_stop_raw))
+
+  # Avoid kernel EINVAL when start >= current stop
+  if (( start >= cur_stop )); then
+    printf '%s\n' "$stop" > "$stop_f" 2>/dev/null || { echo "ERR write failed: end_threshold"; return 1; }
+    printf '%s\n' "$start" > "$start_f" 2>/dev/null || { echo "ERR write failed: start_threshold"; return 1; }
+  else
+    printf '%s\n' "$start" > "$start_f" 2>/dev/null || { echo "ERR write failed: start_threshold"; return 1; }
+    printf '%s\n' "$stop" > "$stop_f" 2>/dev/null || { echo "ERR write failed: end_threshold"; return 1; }
+  fi
+  echo "OK"
+}
+
+enable_upower_recal() {
+  mkdir -p /etc/UPower/UPower.conf.d 2>/dev/null || { echo "ERR mkdir upower failed"; return 1; }
+  if ! printf '[UPower]\nExpectBatteryRecalibration=true\n' > "$UPOWER_DROPIN" 2>/dev/null; then
+    echo "ERR write failed: $UPOWER_DROPIN"
+    return 1
+  fi
+  UPOWER_MODIFIED=1
+  systemctl restart upower.service >/dev/null 2>&1 || true
+  echo "OK"
+}
+
+restore_upower_recal() {
+  if (( UPOWER_MODIFIED == 1 )) && [[ -f "$UPOWER_DROPIN" ]]; then
+    rm -f "$UPOWER_DROPIN" 2>/dev/null || true
+    UPOWER_MODIFIED=0
+    systemctl restart upower.service >/dev/null 2>&1 || true
+  fi
+  echo "OK"
+}
+
+cleanup_session() {
+  (( CLEANED_UP == 1 )) && return 0
+  CLEANED_UP=1
+  write_behaviour auto >/dev/null 2>&1 || true
+  write_thresholds "$ORIG_START" "$ORIG_STOP" >/dev/null 2>&1 || true
+  restore_upower_recal >/dev/null 2>&1 || true
+}
+
+run_session() {
+  local s_raw="0" e_raw="100"
+  [[ -r "$BAT_DIR/charge_control_start_threshold" ]] && s_raw=$(cat "$BAT_DIR/charge_control_start_threshold" 2>/dev/null || echo "0")
+  [[ -r "$BAT_DIR/charge_control_end_threshold" ]] && e_raw=$(cat "$BAT_DIR/charge_control_end_threshold" 2>/dev/null || echo "100")
+  valid_percent "$s_raw" && ORIG_START=$((10#$s_raw))
+  valid_percent "$e_raw" && ORIG_STOP=$((10#$e_raw))
+
+  CLEANED_UP=0
+  trap cleanup_session EXIT
+  trap 'cleanup_session; exit 143' INT TERM HUP
+
+  echo "READY"
+  local cmd="" arg1="" arg2=""
+  while IFS=' ' read -r cmd arg1 arg2; do
+    case "$cmd" in
+      PING)
+        echo "OK"
+        ;;
+      SET_BEHAVIOUR)
+        write_behaviour "${arg1:-}" || true
+        ;;
+      SET_THRESHOLDS)
+        write_thresholds "${arg1:-}" "${arg2:-}" || true
+        ;;
+      ENABLE_UPOWER_RECAL)
+        enable_upower_recal || true
+        ;;
+      RESTORE_UPOWER_RECAL)
+        restore_upower_recal || true
+        ;;
+      QUIT)
+        cleanup_session
+        echo "OK"
+        exit 0
+        ;;
+      "")
+        ;;
+      *)
+        echo "ERR unknown command: $cmd"
+        ;;
+    esac
+  done
+}
+
+case "${1:-}" in
+  --session)
+    run_session
+    ;;
+  set-behaviour)
+    write_behaviour "${2:-}"
+    ;;
+  set-thresholds)
+    write_thresholds "${2:-}" "${3:-}"
+    ;;
+  *)
+    echo "Usage: batcal-helper [--session | set-behaviour <mode> | set-thresholds <start> <stop>]" >&2
+    exit 1
+    ;;
+esac

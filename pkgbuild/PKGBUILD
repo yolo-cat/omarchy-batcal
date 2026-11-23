@@ -1,0 +1,22 @@
+pkgname=batcal
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Battery calibration and charge-threshold gliding utility for Omarchy"
+arch=('x86_64' 'aarch64')
+license=('MIT')
+depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'polkit')
+makedepends=('gcc' 'make')
+
+build() {
+  local root="$startdir/.."
+  "$root/bin/build"
+}
+
+package() {
+  local root="$startdir/.."
+  install -Dm755 "$root/build/batcal" "$pkgdir/usr/bin/batcal"
+  install -Dm755 "$root/scripts/batcal-helper" "$pkgdir/usr/lib/batcal/batcal-helper"
+  install -Dm644 "$startdir/batcal.desktop" "$pkgdir/usr/share/applications/batcal.desktop"
+  install -Dm644 "$startdir/batcal.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/batcal.svg"
+  install -Dm644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

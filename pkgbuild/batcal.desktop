@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Batcal
+Name[zh_TW]=電池校準 (Batcal)
+Comment=Battery calibration and charge threshold gliding
+Comment[zh_TW]=電池安全校準與充電滑翔範圍設定
+Exec=batcal
+Icon=batcal
+Terminal=false
+Categories=System;Utility;
+StartupWMClass=batcal
